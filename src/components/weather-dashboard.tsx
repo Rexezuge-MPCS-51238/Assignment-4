@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useDeferredValue,
   useEffect,
   useState,
@@ -9,6 +10,7 @@ import {
   type SetStateAction,
 } from "react";
 import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
+import { useUser } from "@clerk/nextjs";
 import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
 import type { WeatherObservationRow } from "@/lib/types";
 import {
@@ -17,6 +19,7 @@ import {
   formatWind,
   weatherCodeToLabel,
 } from "@/lib/weather";
+import { FavoriteStar } from "@/components/favorite-star";
 
 type DashboardState = "idle" | "loading" | "live" | "error";
 
@@ -69,6 +72,7 @@ function handleRealtimeChange(
 
 export function WeatherDashboard() {
   const supabase = getBrowserSupabaseClient();
+  const { isSignedIn, isLoaded: isAuthLoaded } = useUser();
   const [reports, setReports] = useState<WeatherObservationRow[]>([]);
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -77,6 +81,8 @@ export function WeatherDashboard() {
     supabase ? null : "Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY.",
   );
   const [clock, setClock] = useState(() => Date.now());
+  const [favorites, setFavorites] = useState<Set<string>>(() => new Set());
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClock(Date.now()), 60_000);
@@ -138,14 +144,72 @@ export function WeatherDashboard() {
     };
   }, [supabase]);
 
-  const normalizedQuery = deferredQuery.trim().toLowerCase();
-  const filteredReports = !normalizedQuery
-    ? reports
-    : reports.filter((report) => {
-        const city = report.city_name.toLowerCase();
-        const country = report.country.toLowerCase();
-        return city.includes(normalizedQuery) || country.includes(normalizedQuery);
+  useEffect(() => {
+    if (!isAuthLoaded) {
+      return;
+    }
+
+    if (!isSignedIn) {
+      startTransition(() => {
+        setFavorites(new Set());
+        setFavoritesOnly(false);
       });
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadFavorites() {
+      try {
+        const response = await fetch("/api/favorites");
+        if (!response.ok) return;
+        const payload = (await response.json()) as {
+          favorites?: { city_slug: string }[];
+        };
+        if (cancelled) return;
+        startTransition(() => {
+          setFavorites(
+            new Set<string>(
+              (payload.favorites ?? []).map((row) => row.city_slug),
+            ),
+          );
+        });
+      } catch {
+        // ignore; dashboard stays usable without favorites
+      }
+    }
+
+    void loadFavorites();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthLoaded, isSignedIn]);
+
+  const handleFavoriteChange = useCallback(
+    (citySlug: string, nextValue: boolean) => {
+      setFavorites((current) => {
+        const next = new Set(current);
+        if (nextValue) {
+          next.add(citySlug);
+        } else {
+          next.delete(citySlug);
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const normalizedQuery = deferredQuery.trim().toLowerCase();
+  const filteredReports = reports.filter((report) => {
+    if (favoritesOnly && !favorites.has(report.city_slug)) {
+      return false;
+    }
+    if (!normalizedQuery) return true;
+    const city = report.city_name.toLowerCase();
+    const country = report.country.toLowerCase();
+    return city.includes(normalizedQuery) || country.includes(normalizedQuery);
+  });
 
   const hottestCity = reports.reduce<WeatherObservationRow | null>((current, report) => {
     if (!current || report.temperature_c > current.temperature_c) {
@@ -201,18 +265,33 @@ export function WeatherDashboard() {
               className="w-full rounded-full border border-white/15 bg-white/8 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-400 focus:border-cyan-300"
             />
           </label>
-          <p className="text-sm text-slate-300">
-            Refreshed display time:{" "}
-            <span className="font-medium text-white">
-              {new Intl.DateTimeFormat("en-US", {
-                hour: "numeric",
-                minute: "2-digit",
-                second: "2-digit",
-                timeZone: "UTC",
-                timeZoneName: "short",
-              }).format(clock)}
-            </span>
-          </p>
+          <div className="flex flex-col gap-2 text-sm text-slate-300 sm:flex-row sm:items-center sm:gap-5">
+            {isSignedIn ? (
+              <label className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-4 py-2">
+                <input
+                  type="checkbox"
+                  checked={favoritesOnly}
+                  onChange={(event) => setFavoritesOnly(event.target.checked)}
+                  className="h-4 w-4 accent-amber-300"
+                />
+                <span className="text-xs font-semibold uppercase tracking-[0.2em] text-white">
+                  My cities ({favorites.size})
+                </span>
+              </label>
+            ) : null}
+            <p>
+              Refreshed display time:{" "}
+              <span className="font-medium text-white">
+                {new Intl.DateTimeFormat("en-US", {
+                  hour: "numeric",
+                  minute: "2-digit",
+                  second: "2-digit",
+                  timeZone: "UTC",
+                  timeZoneName: "short",
+                }).format(clock)}
+              </span>
+            </p>
+          </div>
         </div>
       </div>
 
@@ -237,9 +316,19 @@ export function WeatherDashboard() {
                   {report.city_name}
                 </h3>
               </div>
-              <span className="rounded-full bg-slate-950 px-3 py-1 text-xs font-medium text-white">
-                {report.is_day ? "Day" : "Night"}
-              </span>
+              <div className="flex items-center gap-2">
+                {isSignedIn ? (
+                  <FavoriteStar
+                    citySlug={report.city_slug}
+                    cityName={report.city_name}
+                    isFavorite={favorites.has(report.city_slug)}
+                    onChange={handleFavoriteChange}
+                  />
+                ) : null}
+                <span className="rounded-full bg-slate-950 px-3 py-1 text-xs font-medium text-white">
+                  {report.is_day ? "Day" : "Night"}
+                </span>
+              </div>
             </div>
 
             <div className="mt-6 flex items-end justify-between gap-4">
@@ -291,7 +380,9 @@ export function WeatherDashboard() {
 
       {state !== "loading" && filteredReports.length === 0 ? (
         <div className="rounded-[1.5rem] border border-slate-200 bg-white px-5 py-6 text-sm text-slate-600">
-          No city matched the current filter.
+          {favoritesOnly
+            ? "You haven't starred any cities yet. Tap the star on a card to save it here."
+            : "No city matched the current filter."}
         </div>
       ) : null}
     </div>

@@ -44,3 +44,17 @@ begin
   end if;
 end
 $$;
+
+create table if not exists public.user_favorites (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null,
+  city_slug text not null references public.weather_observations(city_slug) on delete cascade,
+  created_at timestamptz not null default timezone('utc', now()),
+  unique (user_id, city_slug)
+);
+
+create index if not exists user_favorites_user_id_idx
+  on public.user_favorites (user_id);
+
+-- RLS intentionally disabled on user_favorites: API routes enforce user_id via WHERE
+-- using the service role key, mirroring the Assignment-3 saved_recipes pattern.

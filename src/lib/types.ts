@@ -17,12 +17,35 @@ export type WeatherObservationRow = {
   wind_speed_kph: number;
 };
 
+export type UserFavoriteRow = {
+  id: string;
+  user_id: string;
+  city_slug: string;
+  created_at: string;
+};
+
+type UserFavoriteInsert = Pick<UserFavoriteRow, "user_id" | "city_slug"> &
+  Partial<Pick<UserFavoriteRow, "id" | "created_at">>;
+
 export type Database = {
   public: {
     Tables: {
       weather_observations: {
         Row: WeatherObservationRow;
+        Insert: WeatherObservationRow;
+        Update: Partial<WeatherObservationRow>;
+        Relationships: [];
+      };
+      user_favorites: {
+        Row: UserFavoriteRow;
+        Insert: UserFavoriteInsert;
+        Update: Partial<UserFavoriteInsert>;
+        Relationships: [];
       };
     };
+    Views: Record<string, never>;
+    Functions: Record<string, never>;
+    Enums: Record<string, never>;
+    CompositeTypes: Record<string, never>;
   };
 };

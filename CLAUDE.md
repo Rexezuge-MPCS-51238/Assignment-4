@@ -57,20 +57,38 @@ Primary key: `city_slug`. One row per tracked city, overwritten on every poll.
 
 ## Auth Model
 
-- **Clerk** owns identity. `<ClerkProvider>` wraps the app; a modal SignIn /
-  SignUp flow is embedded in the global header (`src/app/layout.tsx`).
+- **Clerk v7** owns identity. `<ClerkProvider>` wraps the app; a modal SignIn
+  / SignUp flow is embedded in the global header (`src/app/layout.tsx`).
+- Signed-in / signed-out branching uses Clerk v7's `<Show when="signed-in">`
+  / `<Show when="signed-out">` — the older `<SignedIn>` / `<SignedOut>`
+  components were removed in v7. Fallback `/sign-in` and `/sign-up`
+  catch-all routes are provided for deep links.
 - `src/middleware.ts` runs `clerkMiddleware()` over all non-static routes. No
   route gating at the middleware — gating happens in API routes via `auth()`.
+  Next.js 16 emits a deprecation warning suggesting `proxy.ts`; we stay on
+  `middleware.ts` until Clerk officially supports the new convention.
 - API routes in `src/app/api/favorites/` call `auth()` from
   `@clerk/nextjs/server`, reject unauthenticated requests with 401, and scope
   queries by `userId`.
 - The dashboard is public: anyone can see live city data. Sign-in unlocks
   per-card star buttons and the "My cities" filter toggle.
 
+## API Contract
+
+| Method | Path                      | Auth     | Body / Params            | Behavior                                                              |
+|--------|---------------------------|----------|--------------------------|-----------------------------------------------------------------------|
+| GET    | `/api/favorites`          | Required | —                        | Returns `{ favorites: [{ city_slug }] }` for the current `userId`.    |
+| POST   | `/api/favorites`          | Required | `{ city_slug }`          | Upserts `(user_id, city_slug)`. Dedup via `unique(user_id, city_slug)`. |
+| DELETE | `/api/favorites/[slug]`   | Required | `slug` = URL-encoded     | Deletes rows matching `user_id` AND `city_slug`.                      |
+
+All three use `runtime = "nodejs"` and the server-role Supabase client at
+`src/lib/supabase/server.ts` — **never import that module from a client
+component**.
+
 ## Data Flow
 
 1. Worker boots, calls Open-Meteo `current` endpoint for each city in
-   `worker/cities.mjs`.
+   `worker/cities.mjs` (Chicago, Tokyo, Nairobi, Berlin, Sao Paulo, Sydney).
 2. Worker upserts a single row per `city_slug` into `weather_observations` via
    the service-role client.
 3. Postgres emits a logical replication event to the `supabase_realtime`
@@ -79,6 +97,21 @@ Primary key: `city_slug`. One row per tracked city, overwritten on every poll.
    upserts the new row into local state — the card re-renders in place.
 5. Signed-in users click a star; the browser POSTs/DELETEs `/api/favorites`
    which writes `user_favorites` server-side.
+
+### Polling cadence + rate limits
+
+Open-Meteo's free tier caps at **10,000 requests/day** across your whole
+worker. With 6 tracked cities:
+
+| `POLL_INTERVAL_MS` | Requests/day | Notes                                         |
+|--------------------|--------------|-----------------------------------------------|
+| `300000` (5 min)   | ~1,728       | Default. Safe headroom for more cities.       |
+| `60000` (1 min)    | ~8,640       | Comfortably under the cap.                    |
+| `30000` (30 sec)   | ~17,280      | **Exceeds free tier** — expect 429s.          |
+
+Open-Meteo itself updates most fields hourly, so polling faster than ~5 min
+rarely surfaces new data. Prefer lowering `POLL_INTERVAL_MS` in Railway over
+shipping a smaller default.
 
 ## Environment Variables
 
@@ -129,3 +162,12 @@ exits instead of looping.
   automatically picks up whatever rows exist in `weather_observations`.
 - Stale favorites are pruned automatically because `user_favorites.city_slug`
   has `on delete cascade`.
+- To change poll cadence, set `POLL_INTERVAL_MS` in Railway's Variables tab;
+  the worker re-reads it on next restart.
+
+## Verified
+
+- `npm run build` passes (Next.js 16.2.2 Turbopack, 4 routes + API + catch-alls).
+- `npm run lint` passes clean.
+- `supabase/schema.sql` is idempotent (`if not exists` / `drop ... if exists`);
+  safe to re-run any time.
